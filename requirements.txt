@@ -1,0 +1,7 @@
+gym_super_mario_bros
+nes-py
+torch
+scikit-learn
+numpy
+matplotlib
+tqdm

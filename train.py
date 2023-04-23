@@ -9,6 +9,7 @@ import torch
 import torch.nn as nn
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+import cv2
 
 def generate_data(env, num = 1000, repeated_actions = 6):
     data = []
@@ -19,6 +20,8 @@ def generate_data(env, num = 1000, repeated_actions = 6):
         for step in range(repeated_actions):
             new_state,_,_,_ = env.step(action)
         labels.append(action)
+        if np.array_equal(prev_state, new_state):
+            print("same")
         data.append(np.stack((prev_state, new_state)))
         prev_state = new_state
 
@@ -32,6 +35,14 @@ data, labels = generate_data(env)
 
 data = np.array(data)
 labels = np.array(labels)
+
+for i in range(0,1000,10):
+    print(labels[i])
+    cv2.imshow('s(t)', data[i][0])
+    cv2.waitKey(0)
+    cv2.imshow('s(t+1)', data[i][1])
+    cv2.waitKey(0)
+
 
 X_train, X_test, y_train, y_test = train_test_split(data, labels, test_size=0.2, random_state=42)
 
