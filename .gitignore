@@ -1,1 +1,3 @@
 *.npy
+images/
+__pycache__/

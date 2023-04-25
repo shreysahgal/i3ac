@@ -23,7 +23,8 @@ class Region:
         self.num_error = 0
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.expert = Expert()
+        self.expert = Expert().to(self.device)
+        self.optimizer = torch.optim.Adam(self.expert.parameters(), lr=0.001)
 
         self.state_motor = np.zeros((self.max_samples, 84*84 + 12))
         self.next_state = np.zeros((self.max_samples, 84*84))
@@ -38,6 +39,26 @@ class Region:
         self.num_error = num_samples
 
         # TODO: train child expert on given samples
+    
+    def train_on_parent_samples(self, state_motor, next_state, num_samples, num_epochs=100):
+        self.expert.train()
+        X = torch.tensor(state_motor).float().to(self.device)
+        y = torch.tensor(next_state).float().to(self.device)
+        
+        data = torch.utils.data.TensorDataset(X, y)
+        data_loader = torch.utils.data.DataLoader(data, batch_size=int(num_samples), shuffle=True)
+
+        criterion = torch.nn.MSELoss()
+        self.optimizer.zero_grad()
+
+        for epoch in tqdm(range(num_epochs)):
+            for batch_idx, (data, target) in enumerate(data_loader):
+                output = self.expert(data)
+                loss = criterion(output, target)
+                loss.backward()
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+
     
     def add_state_motor(self, state, action):
         action = torch.nn.functional.one_hot(torch.tensor(action), num_classes=12).float()
@@ -57,17 +78,17 @@ class Region:
         del X
         return output
 
-    def update_expert(self, optimizer):
+    def update_expert(self):
         self.expert.train()
         X = torch.tensor(self.state_motor[self.num_state_motor-1]).float().to(self.device)
         y = torch.tensor(self.next_state[self.num_next_state-1]).float().to(self.device)
 
         loss = torch.nn.MSELoss()
-        optimizer.zero_grad()
+        self.optimizer.zero_grad()
         output = self.expert(X)
         loss = loss(output, y)
         loss.backward()
-        optimizer.step()
+        self.optimizer.step()
         X.to("cpu")
         y.to("cpu")
         del X, y
@@ -92,8 +113,11 @@ class Region:
         region1 = Region(self.max_samples, centroids[0])
         region2 = Region(self.max_samples, centroids[1])
 
-        region1.inherit_from_parent(self.state_motor[clusters == 0], self.next_state[clusters == 0], np.sum(clusters == 0))
-        region2.inherit_from_parent(self.state_motor[clusters == 1], self.next_state[clusters == 1], np.sum(clusters == 1))
+        # region1.inherit_from_parent(self.state_motor[clusters == 0], self.next_state[clusters == 0], np.sum(clusters == 0))
+        # region2.inherit_from_parent(self.state_motor[clusters == 1], self.next_state[clusters == 1], np.sum(clusters == 1))
+
+        region1.train_on_parent_samples(self.state_motor[clusters == 0], self.next_state[clusters == 0], np.sum(clusters==0))
+        region2.train_on_parent_samples(self.state_motor[clusters == 1], self.next_state[clusters == 1], np.sum(clusters==1))
 
         return region1, region2
     
@@ -185,7 +209,7 @@ class IAC:
         region_idx, action = self.select_region_action()
 
         # load region expert onto gpu
-        self.regions[region_idx].expert.to('cuda')
+        # self.regions[region_idx].expert.to('cuda')
 
         # update region state motor
         self.regions[region_idx].add_state_motor(self.state, action)
@@ -205,15 +229,15 @@ class IAC:
         self.regions[region_idx].update_error(error)
 
         # update region expert
-        self.regions[region_idx].update_expert(self.optim)
+        self.regions[region_idx].update_expert()
 
         # load region expert off of gpu
-        self.regions[region_idx].expert.to('cpu')
+        # self.regions[region_idx].expert.to('cpu')
 
         print("Step: {}, Region: {}, Action: {}, Error: {}".format(self.num_steps, region_idx, action, self.regions[region_idx].get_last_error()))
 
         # print cached, allocated, and total memory in GB
-        print("Cached Memory: {}, Allocated Memory: {}, Total Memory: {}".format(torch.cuda.memory_cached()/1e9, torch.cuda.memory_allocated()/1e9, torch.cuda.get_device_properties(0).total_memory/1e9))
+        # print("Cached Memory: {}, Allocated Memory: {}, Total Memory: {}".format(torch.cuda.memory_cached()/1e9, torch.cuda.memory_allocated()/1e9, torch.cuda.get_device_properties(0).total_memory/1e9))
 
         # split region if number of samples is greater than threshold
         if self.regions[region_idx].should_split():
@@ -255,7 +279,8 @@ if __name__ == "__main__":
         error_list.append(error)
         # print(error)
         # print(len(error_list))
-        # print(time() - start)
+        print(f"time: {time() - start}")
+        print()
     
     plt.plot(error_list[::10])
     plt.yscale("log")
