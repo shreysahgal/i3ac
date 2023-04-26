@@ -16,7 +16,13 @@ from tabulate import tabulate
 
 class Region:
 
-    def __init__(self, max_samples=100, centroids=np.zeros((1, 84*84 + 12)), tau=15, theta=25, random_steps=100, n_parent_samples=0):
+    def __init__(self, max_samples=100, centroids=None, tau=15, theta=25, random_steps=100, n_parent_samples=0, image_dims=(84,84), action_space_dim=12):
+
+        if centroids is None:
+            self.centroids = np.zeros((1, 84*84 + action_space_dim))
+        else:
+            self.centroids = centroids
+        self.action_space_dim = action_space_dim
 
         self.max_samples = max_samples
         self.centroids = centroids
@@ -28,10 +34,10 @@ class Region:
         self.random_steps = random_steps
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.expert = Expert()
+        self.expert = Expert(image_dims=image_dims, action_space_dim=action_space_dim)
         self.optimizer = torch.optim.Adam(self.expert.parameters(), lr=0.001)
 
-        self.state_motor = np.zeros((self.max_samples + self.n_parent_samples, 84*84 + 12))
+        self.state_motor = np.zeros((self.max_samples + self.n_parent_samples, 84*84 + action_space_dim))
         self.next_state = np.zeros((self.max_samples + self.n_parent_samples, 84*84))
         self.error = np.zeros(self.max_samples + self.n_parent_samples)
         self.num_state_motor = self.n_parent_samples
@@ -71,7 +77,7 @@ class Region:
 
     
     def add_state_motor(self, state, action):
-        action = torch.nn.functional.one_hot(torch.tensor(action), num_classes=12).float()
+        action = torch.nn.functional.one_hot(torch.tensor(action), num_classes=self.action_space_dim).float()
         state_motor = np.concatenate((state.flatten(), action))
         self.state_motor[self.num_state_motor] = state_motor
         self.num_state_motor += 1
@@ -140,8 +146,8 @@ class Region:
         centroids = kmeans.cluster_centers_
         clusters = kmeans.labels_
 
-        region1 = Region(self.max_samples, centroids[0], n_parent_samples=np.sum(clusters==0))
-        region2 = Region(self.max_samples, centroids[1], n_parent_samples=np.sum(clusters==1))
+        region1 = Region(self.max_samples, centroids[0], n_parent_samples=np.sum(clusters==0), action_space_dim=self.action_space_dim)
+        region2 = Region(self.max_samples, centroids[1], n_parent_samples=np.sum(clusters==1), action_space_dim=self.action_space_dim)
 
         region1.train_on_parent_samples(self.state_motor[clusters == 0], self.next_state[clusters == 0])
         region2.train_on_parent_samples(self.state_motor[clusters == 1], self.next_state[clusters == 1])
@@ -157,20 +163,21 @@ class Region:
         
 
 class IAC:
-    def __init__(self, env, sensory_dim=84*84, split_threshold=100, epsilon=0.2):
+    def __init__(self, env, sensory_dim=84*84, split_threshold=100, epsilon=0.2, render=False):
         self.env = env
+        self.render = render
         self.state = self.env.reset()
         self.action_space = self.env.action_space
         self.sensory_dim = sensory_dim
 
-        self.random_steps = 100
-        self.repeat_action = 4
+        self.random_steps = 50
+        self.repeat_action = 6
         self.epsilon = epsilon
 
         self.num_steps = 0
 
         self.n_regions = 1
-        self.regions = [Region()]
+        self.regions = [Region(action_space_dim=self.action_space.n)]
         self.prev_region = None
 
         self.split_threshold = split_threshold
@@ -181,9 +188,6 @@ class IAC:
     def reset(self):
         self.state = self.env.reset()
         return self.state
-    
-    def render(self):
-        self.env.render()
 
     def select_region_action(self):
 
@@ -202,7 +206,9 @@ class IAC:
                 dists = np.zeros(self.n_regions)
                 for i in range(self.n_regions):
                     dists[i] = np.linalg.norm(self.regions[i].centroids - SM_t)
-                region = np.argmin(dists)
+                # region = np.argmin(dists)
+                # break argmin ties randomly
+                region = np.random.choice(np.where(dists == np.min(dists))[0])
             return region, action
         
         # choose action based on learning progress
@@ -226,7 +232,9 @@ class IAC:
                 lp_list[action] = self.regions[region].learning_progress
                 # print(f"{action}: {region}, {self.regions[region].learning_progress}")
             
-            action = int(np.argmax(lp_list))
+            # action = int(np.argmax(lp_list))
+            # break argmax ties randomly
+            action = np.random.choice(np.where(lp_list == np.max(lp_list))[0])
             region = int(regions[action])
 
             # breakpoint()
@@ -257,11 +265,14 @@ class IAC:
         # step environment
         for _ in range(self.repeat_action):
             next_state, reward, done, info = self.env.step(action)
+            if self.render:
+                self.env.render()
         # update region next state
         self.regions[region_idx].add_next_state(next_state)
         # update error of the region
         error = np.linalg.norm(predicted_state - next_state.flatten())
         self.regions[region_idx].update_error(error)
+        # print(len(error_list))gion_idx].update_error(error)
         # update region expert
         self.regions[region_idx].update_expert()
         self.regions[region_idx].update_learning_progress()
@@ -327,11 +338,11 @@ if __name__ == "__main__":
 
 
     env = gym_super_mario_bros.make('SuperMarioBros-v0', new_step_api=False)
-    env = JoypadSpace(env, COMPLEX_MOVEMENT)
+    env = JoypadSpace(env, SIMPLE_MOVEMENT)
     env = ResizeObservation(env, (84, 84))
     env = GrayScaleObservation(env)
 
-    iac = IAC(env)
+    iac = IAC(env, render=True)
 
     error_list = []
 
