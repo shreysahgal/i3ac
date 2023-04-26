@@ -7,47 +7,48 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 import gc
+from tabulate import tabulate
 
 # TODO: add region splitting DONE
 # TODO: repeated actions DONE
 # TODO: calculate LP
 
+
 class Region:
 
-    def __init__(self, max_samples=100, centroids=np.zeros((1, 84*84 + 12))):
+    def __init__(self, max_samples=100, centroids=np.zeros((1, 84*84 + 12)), tau=15, theta=25, random_steps=100, n_parent_samples=0):
 
         self.max_samples = max_samples
         self.centroids = centroids
-        self.num_state_motor = 0
-        self.num_next_state = 0
-        self.num_error = 0
+        self.n_parent_samples = n_parent_samples
+
+        self.learning_progress = None
+        self.tau = tau
+        self.theta = theta
+        self.random_steps = random_steps
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.expert = Expert()
         self.optimizer = torch.optim.Adam(self.expert.parameters(), lr=0.001)
 
-        self.state_motor = np.zeros((self.max_samples, 84*84 + 12))
-        self.next_state = np.zeros((self.max_samples, 84*84))
-        self.error = np.zeros(self.max_samples)
+        self.state_motor = np.zeros((self.max_samples + self.n_parent_samples, 84*84 + 12))
+        self.next_state = np.zeros((self.max_samples + self.n_parent_samples, 84*84))
+        self.error = np.zeros(self.max_samples + self.n_parent_samples)
+        self.num_state_motor = self.n_parent_samples
+        self.num_next_state = self.n_parent_samples
+        self.num_error = self.n_parent_samples
     
-    def inherit_from_parent(self, state_motor, next_state, num_samples):
-        self.state_motor[:num_samples] = state_motor
-        self.next_state[:num_samples] = next_state
-        print(num_samples)
-        self.num_state_motor = num_samples
-        self.num_next_state = num_samples
-        self.num_error = num_samples
+    def train_on_parent_samples(self, state_motor, next_state, num_epochs=100):
 
-        # TODO: train child expert on given samples
-    
-    def train_on_parent_samples(self, state_motor, next_state, num_samples, num_epochs=100):
+        assert self.n_parent_samples != 0
+        
         self.expert.train()
         self.expert.to(self.device)
         X = torch.tensor(state_motor).float().to(self.device)
         y = torch.tensor(next_state).float().to(self.device)
         
         data = torch.utils.data.TensorDataset(X, y)
-        data_loader = torch.utils.data.DataLoader(data, batch_size=int(num_samples), shuffle=True)
+        data_loader = torch.utils.data.DataLoader(data, batch_size=int(self.n_parent_samples), shuffle=True)
 
         criterion = torch.nn.MSELoss()
         self.optimizer.zero_grad()
@@ -60,7 +61,13 @@ class Region:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
+                error = np.linalg.norm(output.detach().cpu().numpy() - target.cpu().numpy(), axis=1)
+                error_from_parent = error
+
         self.expert.to("cpu")
+
+        self.error[:self.n_parent_samples] = error
+        self.update_learning_progress()
 
     
     def add_state_motor(self, state, action):
@@ -99,6 +106,25 @@ class Region:
     def update_error(self, error):
         self.error[self.num_error] = error
         self.num_error += 1
+    
+    def update_learning_progress(self):
+        # if self.num_error <= self.random_steps:
+        #     self.learning_progress = 0
+        
+        if self.num_error <= self.tau + self.theta + 1:
+            # only true for the first region
+            print("Not enough samples and is the first region")
+            assert self.tau + self.theta + 1 <= self.random_steps
+            self.learning_progress = np.inf
+        
+        else:
+            if self.num_error - self.n_parent_samples >= self.tau + self.theta:
+                print("Enough samples... calculating LP with all samples")
+            else:
+                print("Not eough samples... calculating LP with parents and region samples")
+            e1 = np.sum(self.error[self.num_error-self.theta-1:self.num_error-1])
+            e2 = np.sum(self.error[self.num_error-self.tau-self.theta-1:self.num_error-1])
+            self.learning_progress = (e2 - e1) / self.theta
         
     def get_last_error(self):
         return self.error[self.num_error-1]
@@ -114,29 +140,20 @@ class Region:
         centroids = kmeans.cluster_centers_
         clusters = kmeans.labels_
 
-        region1 = Region(self.max_samples, centroids[0])
-        region2 = Region(self.max_samples, centroids[1])
+        region1 = Region(self.max_samples, centroids[0], n_parent_samples=np.sum(clusters==0))
+        region2 = Region(self.max_samples, centroids[1], n_parent_samples=np.sum(clusters==1))
 
-        # region1.inherit_from_parent(self.state_motor[clusters == 0], self.next_state[clusters == 0], np.sum(clusters == 0))
-        # region2.inherit_from_parent(self.state_motor[clusters == 1], self.next_state[clusters == 1], np.sum(clusters == 1))
-
-        region1.train_on_parent_samples(self.state_motor[clusters == 0], self.next_state[clusters == 0], np.sum(clusters==0))
-        region2.train_on_parent_samples(self.state_motor[clusters == 1], self.next_state[clusters == 1], np.sum(clusters==1))
+        region1.train_on_parent_samples(self.state_motor[clusters == 0], self.next_state[clusters == 0])
+        region2.train_on_parent_samples(self.state_motor[clusters == 1], self.next_state[clusters == 1])
 
         return region1, region2
     
     def should_split(self):
-        if self.num_state_motor >= self.max_samples:
+        assert self.num_state_motor == self.num_next_state == self.num_error
+        if self.num_state_motor >= self.max_samples + self.n_parent_samples:
             return True
         else:
             return False
-    
-    def expert_to_gpu(self):
-        self.expert.to(self.device)
-    
-    def expert_to_cpu(self):
-        self.expert.to("cpu")
-
         
 
 class IAC:
@@ -146,7 +163,7 @@ class IAC:
         self.action_space = self.env.action_space
         self.sensory_dim = sensory_dim
 
-        self.random_steps = 1000
+        self.random_steps = 100
         self.repeat_action = 4
 
         self.num_steps = 0
@@ -184,39 +201,41 @@ class IAC:
                     dists[i] = np.linalg.norm(self.regions[i].centroids - SM_t)
                 region = np.argmin(dists)
             return region, action
-
-        # TODO: update this with new regions
-        """ 
-        # list of learning progress values for each action
-        lp_list = np.zeros(self.action_space.n)
-
-        for i, action in enumerate(list(range(self.action_space.n))):
-            # TODO: implement the observation space feature encoding here
-            action_vec = np.zeros(self.action_space.n)
-            action_vec[action] = 1
-            SM_t = np.concatenate((self.state.flatten(), action_vec))
-
-            dists = np.linalg.norm(self.centroids - SM_t, axis=1)
-            region = np.argmin(dists)
-
-            # determine expected learning progress
-            lp_list[i] = self.calculate_lp(region, self.state, action)
         
-        action = np.argmax(lp_list)
-        return region, action
-        """
+        # choose action based on learning progress
+        else:
+            # list of learning progress values for each action
+            lp_list = np.zeros(self.action_space.n)
+            regions = np.zeros(self.action_space.n)
+
+            for i, action in enumerate(list(range(self.action_space.n))):
+                # create SM(t) vector
+                action_vec = np.zeros(self.action_space.n)
+                action_vec[action] = 1
+                SM_t = np.concatenate((self.state.flatten(), action_vec))
+                # for each region in self.regions calculate the distance to the state-action vector, find min dists
+                dists = np.zeros(self.n_regions)
+                for i in range(self.n_regions):
+                    dists[i] = np.linalg.norm(self.regions[i].centroids - SM_t)
+                region = np.argmin(dists)
+                regions[action] = region
+                # determine expected learning progress
+                lp_list[action] = self.regions[region].learning_progress
+                # print(f"{action}: {region}, {self.regions[region].learning_progress}")
+            
+            action = int(np.argmax(lp_list))
+            region = int(regions[action])
+
+            # breakpoint()
+
+            return region, action
     
     def calculate_lp(self, region, state, action):
         return None
 
     def step(self):
         # selection region and action
-
-        times = list()
-        times.append(time())
-
         region_idx, action = self.select_region_action()
-        times.append(time())
         
         if region_idx != self.prev_region:
             # unload prev region expert off of gpu
@@ -228,43 +247,21 @@ class IAC:
             print(f"loading region {region_idx} expert onto gpu")
         self.prev_region = region_idx
 
-        times.append(time())
-
         # update region state motor
         self.regions[region_idx].add_state_motor(self.state, action)
-
-        times.append(time())
-
         # make prediction
         predicted_state = self.regions[region_idx].predict_state()
-
-        times.append(time())
-
         # step environment
         for _ in range(self.repeat_action):
             next_state, reward, done, info = self.env.step(action)
-
-        times.append(time())
-
         # update region next state
         self.regions[region_idx].add_next_state(next_state)
-
-        times.append(time())
-
         # update error of the region
         error = np.linalg.norm(predicted_state - next_state.flatten())
         self.regions[region_idx].update_error(error)
-
-        times.append(time())
-
         # update region expert
         self.regions[region_idx].update_expert()
-
-        times.append(time())
-
-
-
-        times.append(time())
+        self.regions[region_idx].update_learning_progress()
 
         # print times
         # s = ""
@@ -272,12 +269,10 @@ class IAC:
         #     s += str(times[i+1] - times[i]) + ", "
         # print(s)
 
-
-
         print("Step: {}, Region: {}, Action: {}, Error: {}".format(self.num_steps, region_idx, action, self.regions[region_idx].get_last_error()))
 
         # print cached, allocated, and total memory in GB
-        print("Cached Memory: {}, Allocated Memory: {}, Total Memory: {}".format(torch.cuda.memory_cached()/1e9, torch.cuda.memory_allocated()/1e9, torch.cuda.get_device_properties(0).total_memory/1e9))
+        # print("Cached Memory: {}, Allocated Memory: {}, Total Memory: {}".format(torch.cuda.memory_cached()/1e9, torch.cuda.memory_allocated()/1e9, torch.cuda.get_device_properties(0).total_memory/1e9))
 
         # split region if number of samples is greater than threshold
         if self.regions[region_idx].should_split():
@@ -288,13 +283,36 @@ class IAC:
             self.n_regions += 1
             self.prev_region = None
 
+            # breakpoint()
+
         gc.collect()
         torch.cuda.empty_cache()
         
+        if self.num_steps % 20 == 0:
+            data = [
+                ["Region:"] + [i for i in range(self.n_regions)],
+                ["Num Steps:"] + [f"{region.num_error}/{region.max_samples + region.n_parent_samples}" for region in self.regions],
+                ["LP:"] + [region.learning_progress for region in self.regions],
+                ["Error:"] + [region.get_last_error() for region in self.regions]
+            ]
+            print(tabulate(data, headers="firstrow", tablefmt="fancy_grid"))
+            # s1 = "region:\t"
+            # s2 = "num_steps:\t"
+            # s3 = "LP:\t"
+            # s4 = "error:\t"
+            # for i, region in enumerate(self.regions):
+            #     s1 += f"{i}\t"
+            #     s2 += f"{region.num_error}\t"
+            #     s3 += f"{region.learning_progress}\t"
+            #     s4 += f"{region.get_last_error()}\t"
+            # print(s1)
+            # print(s2)
+            # print(s3)
+            # print(s4)
+
         self.num_steps += 1
         
         return error
-
 
 
 if __name__ == "__main__":
@@ -316,7 +334,7 @@ if __name__ == "__main__":
 
     for i in range(1000):
         start = time()
-        iac.render()
+        # iac.render()
         error = iac.step()
         error_list.append(error)
         # print(error)
