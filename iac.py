@@ -157,7 +157,7 @@ class Region:
         
 
 class IAC:
-    def __init__(self, env, sensory_dim=84*84, split_threshold=100):
+    def __init__(self, env, sensory_dim=84*84, split_threshold=100, epsilon=0.2):
         self.env = env
         self.state = self.env.reset()
         self.action_space = self.env.action_space
@@ -165,6 +165,7 @@ class IAC:
 
         self.random_steps = 100
         self.repeat_action = 4
+        self.epsilon = epsilon
 
         self.num_steps = 0
 
@@ -187,7 +188,9 @@ class IAC:
     def select_region_action(self):
 
         # choose a random action for the first self.num_steps
-        if self.num_steps < self.random_steps:
+        # with probability epsilon, choose a random action
+
+        if self.num_steps < self.random_steps or np.random.rand() < self.epsilon:
             action = self.env.action_space.sample()
             if self.n_regions < 2:
                 region = 0
