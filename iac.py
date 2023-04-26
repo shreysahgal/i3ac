@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 import gc
 
-# TODO: add region splitting
+# TODO: add region splitting DONE
 # TODO: repeated actions DONE
 # TODO: calculate LP
 
@@ -23,7 +23,7 @@ class Region:
         self.num_error = 0
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.expert = Expert().to(self.device)
+        self.expert = Expert()
         self.optimizer = torch.optim.Adam(self.expert.parameters(), lr=0.001)
 
         self.state_motor = np.zeros((self.max_samples, 84*84 + 12))
@@ -42,6 +42,7 @@ class Region:
     
     def train_on_parent_samples(self, state_motor, next_state, num_samples, num_epochs=100):
         self.expert.train()
+        self.expert.to(self.device)
         X = torch.tensor(state_motor).float().to(self.device)
         y = torch.tensor(next_state).float().to(self.device)
         
@@ -58,6 +59,8 @@ class Region:
                 loss.backward()
                 self.optimizer.step()
                 self.optimizer.zero_grad()
+
+        self.expert.to("cpu")
 
     
     def add_state_motor(self, state, action):
@@ -105,6 +108,7 @@ class Region:
         return self.num_state_motor
 
     def split(self):
+        self.expert.to("cpu")
         del self.expert
         kmeans = KMeans(n_clusters=2, random_state=0).fit(self.state_motor)
         centroids = kmeans.cluster_centers_
@@ -143,12 +147,13 @@ class IAC:
         self.sensory_dim = sensory_dim
 
         self.random_steps = 1000
-        self.repeat_action = 2
+        self.repeat_action = 4
 
         self.num_steps = 0
 
         self.n_regions = 1
         self.regions = [Region()]
+        self.prev_region = None
 
         self.split_threshold = split_threshold
 
@@ -206,38 +211,73 @@ class IAC:
 
     def step(self):
         # selection region and action
-        region_idx, action = self.select_region_action()
 
-        # load region expert onto gpu
-        # self.regions[region_idx].expert.to('cuda')
+        times = list()
+        times.append(time())
+
+        region_idx, action = self.select_region_action()
+        times.append(time())
+        
+        if region_idx != self.prev_region:
+            # unload prev region expert off of gpu
+            if self.prev_region is not None:
+                self.regions[self.prev_region].expert.to('cpu')
+                print(f"unloading region {self.prev_region} expert off of gpu")
+            # load region expert onto gpu
+            self.regions[region_idx].expert.to('cuda')
+            print(f"loading region {region_idx} expert onto gpu")
+        self.prev_region = region_idx
+
+        times.append(time())
 
         # update region state motor
         self.regions[region_idx].add_state_motor(self.state, action)
 
+        times.append(time())
+
         # make prediction
         predicted_state = self.regions[region_idx].predict_state()
+
+        times.append(time())
 
         # step environment
         for _ in range(self.repeat_action):
             next_state, reward, done, info = self.env.step(action)
 
+        times.append(time())
+
         # update region next state
         self.regions[region_idx].add_next_state(next_state)
+
+        times.append(time())
 
         # update error of the region
         error = np.linalg.norm(predicted_state - next_state.flatten())
         self.regions[region_idx].update_error(error)
 
+        times.append(time())
+
         # update region expert
         self.regions[region_idx].update_expert()
 
-        # load region expert off of gpu
-        # self.regions[region_idx].expert.to('cpu')
+        times.append(time())
+
+
+
+        times.append(time())
+
+        # print times
+        # s = ""
+        # for i in range(len(times)-1):
+        #     s += str(times[i+1] - times[i]) + ", "
+        # print(s)
+
+
 
         print("Step: {}, Region: {}, Action: {}, Error: {}".format(self.num_steps, region_idx, action, self.regions[region_idx].get_last_error()))
 
         # print cached, allocated, and total memory in GB
-        # print("Cached Memory: {}, Allocated Memory: {}, Total Memory: {}".format(torch.cuda.memory_cached()/1e9, torch.cuda.memory_allocated()/1e9, torch.cuda.get_device_properties(0).total_memory/1e9))
+        print("Cached Memory: {}, Allocated Memory: {}, Total Memory: {}".format(torch.cuda.memory_cached()/1e9, torch.cuda.memory_allocated()/1e9, torch.cuda.get_device_properties(0).total_memory/1e9))
 
         # split region if number of samples is greater than threshold
         if self.regions[region_idx].should_split():
@@ -246,6 +286,7 @@ class IAC:
             self.regions[region_idx] = region1
             self.regions.append(region2)
             self.n_regions += 1
+            self.prev_region = None
 
         gc.collect()
         torch.cuda.empty_cache()
@@ -275,6 +316,7 @@ if __name__ == "__main__":
 
     for i in range(1000):
         start = time()
+        iac.render()
         error = iac.step()
         error_list.append(error)
         # print(error)
