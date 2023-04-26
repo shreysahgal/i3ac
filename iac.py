@@ -25,10 +25,9 @@ class Region:
         self.action_space_dim = action_space_dim
 
         self.max_samples = max_samples
-        self.centroids = centroids
         self.n_parent_samples = n_parent_samples
 
-        self.learning_progress = None
+        self.learning_progress = np.inf
         self.tau = tau
         self.theta = theta
         self.random_steps = random_steps
@@ -224,8 +223,8 @@ class IAC:
                 SM_t = np.concatenate((self.state.flatten(), action_vec))
                 # for each region in self.regions calculate the distance to the state-action vector, find min dists
                 dists = np.zeros(self.n_regions)
-                for i in range(self.n_regions):
-                    dists[i] = np.linalg.norm(self.regions[i].centroids - SM_t)
+                for j in range(self.n_regions):
+                    dists[j] = np.linalg.norm(self.regions[j].centroids - SM_t)
                 region = np.argmin(dists)
                 regions[action] = region
                 # determine expected learning progress
@@ -267,6 +266,8 @@ class IAC:
             next_state, reward, done, info = self.env.step(action)
             if self.render:
                 self.env.render()
+            if done:
+                self.env.reset()
         # update region next state
         self.regions[region_idx].add_next_state(next_state)
         # update error of the region
