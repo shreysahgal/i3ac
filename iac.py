@@ -1,5 +1,5 @@
 import numpy as np
-from expert import Expert
+from models import Expert
 import torch
 from sklearn.preprocessing import OneHotEncoder
 from time import time
@@ -33,7 +33,7 @@ class Region:
         self.random_steps = random_steps
         
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.expert = Expert(image_dims=image_dims, action_space_dim=action_space_dim)
+        self.expert = Expert(obs_dim=image_dims[0]*image_dims[1], action_space_dim=action_space_dim)
         self.optimizer = torch.optim.Adam(self.expert.parameters(), lr=0.001)
 
         self.state_motor = np.zeros((self.max_samples + self.n_parent_samples, 84*84 + action_space_dim))
@@ -71,6 +71,8 @@ class Region:
 
         self.expert.to("cpu")
 
+        if np.all(error == 0):
+            breakpoint()
         self.error[:self.n_parent_samples] = error
         self.update_learning_progress()
 
@@ -131,6 +133,9 @@ class Region:
             e2 = np.sum(self.error[self.num_error-self.tau-self.theta-1:self.num_error-1])
             self.learning_progress = (e2 - e1) / self.theta
         
+        if self.learning_progress == 0:
+            breakpoint()
+        
     def get_last_error(self):
         return self.error[self.num_error-1]
     
@@ -141,15 +146,23 @@ class Region:
     def split(self):
         self.expert.to("cpu")
         del self.expert
-        kmeans = KMeans(n_clusters=2, random_state=0).fit(self.state_motor)
+
+        state_motor = self.state_motor[self.n_parent_samples:]
+        next_state = self.next_state[self.n_parent_samples:]
+
+        kmeans = KMeans(n_clusters=2, random_state=0).fit(state_motor)
         centroids = kmeans.cluster_centers_
         clusters = kmeans.labels_
 
         region1 = Region(self.max_samples, centroids[0], n_parent_samples=np.sum(clusters==0), action_space_dim=self.action_space_dim)
         region2 = Region(self.max_samples, centroids[1], n_parent_samples=np.sum(clusters==1), action_space_dim=self.action_space_dim)
 
-        region1.train_on_parent_samples(self.state_motor[clusters == 0], self.next_state[clusters == 0])
-        region2.train_on_parent_samples(self.state_motor[clusters == 1], self.next_state[clusters == 1])
+        if np.all(next_state[clusters == 0] == 0) or np.all(next_state[clusters == 1] == 0):
+            breakpoint()
+
+        print(f"Split 0: {np.sum(clusters == 0)}, Split 1: {np.sum(clusters == 1)}")
+        region1.train_on_parent_samples(state_motor[clusters == 0], next_state[clusters == 0])
+        region2.train_on_parent_samples(state_motor[clusters == 1], next_state[clusters == 1])
 
         return region1, region2
     
@@ -205,7 +218,6 @@ class IAC:
                 dists = np.zeros(self.n_regions)
                 for i in range(self.n_regions):
                     dists[i] = np.linalg.norm(self.regions[i].centroids - SM_t)
-                # region = np.argmin(dists)
                 # break argmin ties randomly
                 region = np.random.choice(np.where(dists == np.min(dists))[0])
             return region, action
@@ -229,14 +241,17 @@ class IAC:
                 regions[action] = region
                 # determine expected learning progress
                 lp_list[action] = self.regions[region].learning_progress
-                # print(f"{action}: {region}, {self.regions[region].learning_progress}")
+
+                if self.n_regions > 1:
+                    print(f"{action}: {region}, {self.regions[region].learning_progress}")
             
             # action = int(np.argmax(lp_list))
             # break argmax ties randomly
             action = np.random.choice(np.where(lp_list == np.max(lp_list))[0])
             region = int(regions[action])
 
-            # breakpoint()
+            # if self.n_regions > 1:
+            #     breakpoint()
 
             return region, action
     
@@ -325,6 +340,7 @@ class IAC:
             # print(s3)
             # print(s4)
 
+        self.state = next_state
         self.num_steps += 1
         
         return error
@@ -343,7 +359,7 @@ if __name__ == "__main__":
     env = ResizeObservation(env, (84, 84))
     env = GrayScaleObservation(env)
 
-    iac = IAC(env, render=True)
+    iac = IAC(env, render=False)
 
     error_list = []
 

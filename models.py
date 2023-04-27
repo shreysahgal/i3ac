@@ -2,44 +2,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# observations in pixels are (240, 256, 3)
-# actions are 12 discrete actions
-class InverseDyanmicsModel(nn.Module):
+class InverseModel(nn.Module):
+    def __init__(self, image_dims, obs_dim, action_space):
+        super(InverseModel, self).__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv2d(3, 8, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(8, 16, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Conv2d(16, 32, kernel_size=3, stride=1),
+        )
 
-    def __init__(self):
-        super(InverseDyanmicsModel, self).__init__()
-        
-        self.feature_encoder = nn.Sequential(
-            nn.Conv2d(8, 16, kernel_size=3, stride=2),
+        self.fc_group = nn.Sequential(
+            nn.Linear(32*7*7*2, 1024),
             nn.ReLU(),
-            nn.BatchNorm2d(16),
-            nn.Conv2d(16, 32, kernel_size=3, stride=2),
+            nn.Linear(1024, 512),
             nn.ReLU(),
-            nn.BatchNorm2d(32),
-            nn.Conv2d(32, 32, kernel_size=3, stride=2),
-            nn.ReLU(),
-            nn.BatchNorm2d(32),
-        ) #  outputs 32 x 14 x 15 = 6720 flattened
-
-        self.fc = nn.Sequential(
-            nn.Linear(2592, 256),
-            nn.ReLU(),
-            nn.Linear(256, 12),
-            nn.Softmax(dim=1)
+            nn.Linear(512, action_space),
+            nn.Softmax(dim=0)
         )
     
-    def forward(self, x): # x is a stacked pair of pixel observations at time t and t+1
-        # shape: [BATCH_SIZE, 2, 3, 240, 256]
+    def encode(self, x):
+        return self.encoder(x).flatten().unsqueeze(0).float().detach().numpy()
 
-        x = x.view(-1, 8, 84,84) # shape: [BATCH_SIZE*2, 3, 240, 256]
-        x = self.feature_encoder(x) # shape: [BATCH_SIZE*2, 32, 14, 15]
-        x = x.view(1, -1) # shape: [BATCH_SIZE, 6720]
-        x = self.fc(x) # shape: [1, 12]
-        return x
-
-
-if __name__ == "__main__":
-    model = InverseDyanmicsModel()
-
-    asdf = torch.randn(10, 2, 3, 240, 256)
-    print(model(asdf))
+    def forward(self, state, next_state):
+        state = self.encoder(state)
+        next_state = self.encoder(next_state)
+        x = torch.cat((state.flatten(), next_state.flatten()))
+        # breakpoint()
+        x = self.fc_group(x)
+        return x.float()
+    
+class Expert(nn.Module):
+    def __init__(self, obs_dim, action_space_dim=12):
+        super(Expert, self).__init__()
+        # input: 84x84 image + 12 action
+        # output: 84x84 imag
+        self.fc1 = nn.Linear(obs_dim + action_space_dim, obs_dim)
+        self.fc2 = nn.Linear(obs_dim, obs_dim)
+        self.fc3 = nn.Linear(obs_dim, obs_dim)
+    
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = F.relu(self.fc3(x))
+        return x.float()
