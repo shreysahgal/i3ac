@@ -10,80 +10,74 @@ import torch.nn as nn
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-def generate_data(env, num = 1000, repeated_actions = 6):
-    data = []
-    labels = []
-    prev_state = env.reset()
-    for i in tqdm(range(num)):
-        action = env.action_space.sample()
-        for step in range(repeated_actions):
-            new_state,_,_,_ = env.step(action)
-        labels.append(action)
-        data.append(np.stack((prev_state, new_state)))
-        prev_state = new_state
+from torchvision import transforms as T
+import gym
+from gym.spaces import Box
+from gym.wrappers import FrameStack
 
-    env.reset()
-    return data, labels
+def train(state, next_state, labels, plot=True):
+    
+    data = np.concatenate((state, next_state), axis=1)
+    X_train, X_test, y_train, y_test = train_test_split(data, labels, test_size=0.2, random_state=42)
 
-env = gym_super_mario_bros.make('SuperMarioBros-v0')
-env = JoypadSpace(env, COMPLEX_MOVEMENT)
+    trainData = DataLoader(X_train, batch_size=1, shuffle=True)
+    trainLabels = DataLoader(y_train, batch_size=1, shuffle=True)
+    testData = DataLoader(X_test, batch_size=1, shuffle=True)
+    testLabels = DataLoader(y_test, batch_size=1, shuffle=True)
 
-data, labels = generate_data(env)
+    model = InverseDyanmicsModel().to('cuda')
 
-data = np.array(data)
-labels = np.array(labels)
+    NUM_EPOCHS = 1000
+    LR = 0.1
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.SGD(model.parameters(), lr=LR)
 
-X_train, X_test, y_train, y_test = train_test_split(data, labels, test_size=0.2, random_state=42)
+    acc_list = []
+    loss_list = []
 
-trainData = DataLoader(X_train, batch_size=1, shuffle=True)
-trainLabels = DataLoader(y_train, batch_size=1, shuffle=True)
-testData = DataLoader(X_test, batch_size=1, shuffle=True)
-testLabels = DataLoader(y_test, batch_size=1, shuffle=True)
+    for epoch in (pbar := tqdm(range(NUM_EPOCHS))):
+        model.train()
 
-model = InverseDyanmicsModel().to('cuda')
+        train_correct = 0
+        train_loss = 0.0
+        for i, (data, labels) in enumerate(zip(trainData, trainLabels)):
 
-NUM_EPOCHS = 100
-LR = 0.001
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
+            data = torch.tensor(data, dtype=torch.float32).to("cuda")
+            labels = torch.tensor(labels, dtype=torch.long).to("cuda")
 
-acc_list = []
-loss_list = []
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output, labels)
+            loss.backward()
+            optimizer.step()
+            
+            train_correct += (output.argmax(dim=1) == labels).sum().item()
+            train_loss += loss.item()
 
-for epoch in (pbar := tqdm(range(NUM_EPOCHS))):
-    model.train()
-
-    train_correct = 0
-    train_loss = 0.0
-    for i, (data, labels) in enumerate(zip(trainData, trainLabels)):
-
-        data = torch.tensor(data, dtype=torch.float32).to("cuda")
-        labels = torch.tensor(labels, dtype=torch.long).to("cuda")
-
-        optimizer.zero_grad()
-        output = model(data)
-        loss = criterion(output, labels)
-        loss.backward()
-        optimizer.step()
+        # train_acc /= len(trainData)
+        train_acc = train_correct / len(trainData)
+        acc_list.append(train_acc)
+        train_loss /= len(trainData)
+        loss_list.append(train_loss)
         
-        train_correct += (output.argmax(1) == labels).sum().item()
-        train_loss += loss.item()
-        
-        # acc.append(train_acc)
+        pbar.set_description(f"Epoch {epoch+1} | Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f}")
 
-    # train_acc /= len(trainData)
-    train_acc = train_correct / len(trainData)
-    acc_list.append(train_acc)
-    train_loss /= len(trainData)
-    loss_list.append(train_loss)
+    if plot:
+        fig, ax = plt.subplots(1, 2, figsize=(15, 15))
+        ax[0].plot(acc_list)
+        ax[0].set_title("Training Accuracy")
+        ax[1].plot(loss_list)
+        ax[1].set_title("Training Loss")
+        fig.savefig("training.png")
+        plt.close(fig)
 
-    print(train_acc)
-    # pbar.set_description(f"Epoch {epoch+1}/{NUM_EPOCHS} | Loss: {loss.item():.4f} | Train Acc: {train_acc:.4f}")
-        
+    return acc_list, loss_list
 
-fig, ax = plt.subplots(1, 2, figsize=(15, 15))
-ax[0].plot(acc)
-ax[0].set_title("Training Accuracy")
-ax[1].plot(loss)
-ax[1].set_title("Training Loss")
-fig.savefig("training.png")
+if __name__ == "__main__":
+    embeddings = np.load("embeddings.npy", allow_pickle=True)
+    # embeddings is a list of dicts with keys 'embedding' and 'action', converted to numpy arrays of 'data' and 'labels' respectively
+    labels = np.array([i['action'] for i in embeddings])
+    state = np.array([i['state'] for i in embeddings])
+    next_state = np.array([i['next_state'] for i in embeddings])
+
+    acc, loss = train(state, next_state, labels)

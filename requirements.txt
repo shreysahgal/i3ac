@@ -1,0 +1,10 @@
+gym==0.25.1
+gym-notices==0.0.8
+gym-super-mario-bros==7.4.0
+numpy
+torch
+scikit-learn
+tqdm
+matplotlib
+opencv-python
+tabluate
